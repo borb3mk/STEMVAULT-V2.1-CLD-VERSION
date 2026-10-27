@@ -791,7 +791,7 @@
               <span class="tico"><svg class="ic" viewBox="0 0 24 24"><path d="M12 16V4M7 9l5-5 5 5M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></svg></span>
               رفع ومشاركة ملف
             </div>
-            <p class="card-desc">الحد الأقصى للملف 700KB.</p>
+            <p class="card-desc" id="maxSizeNote">الحد الأقصى للملف 700KB.</p>
 
             <div class="field" style="margin-top:0">
               <label for="subjectSelect">المادة العلمية</label>
@@ -885,6 +885,16 @@
 
     const MASTER_KEY  = "$2a$10$3lNm.s53sLxRnK/TlpYvBuDXGe0G7/mKjJqPZCpndlJOKxJqc/Uo.";
     const BIN_ID      = "6adfa49cffd5d160538dc8ec";
+
+    /* ===== تخزين الملفات الكبيرة (Cloudinary) =====
+       املأ القيمتين التاليتين لرفع ملفات حتى 10MB (الخطة المجانية).
+       لو تُركتا فارغتين يرجع الموقع للتخزين القديم (حد 700KB). */
+    const CLOUDINARY_CLOUD_NAME    = "wui5tdj1";
+    const CLOUDINARY_UPLOAD_PRESET = "stem_vault";   // لازم يطابق اسم الـ Unsigned preset اللي عملته
+
+    const USE_CLOUD = !!(CLOUDINARY_CLOUD_NAME && CLOUDINARY_UPLOAD_PRESET);
+    const MAX_FILE_BYTES = USE_CLOUD ? 10 * 1024 * 1024 : 700 * 1024;
+    const MAX_FILE_LABEL = USE_CLOUD ? "10MB" : "700KB";
 
     emailjs.init(PUBLIC_KEY);
 
@@ -1263,13 +1273,66 @@
       }
 
       const file = fileInputEl.files[0];
-      if (file.size > 700 * 1024) {
-        toast("حجم الملف كبير على التخزين السحابي المباشر. الحد الأقصى 700KB.", "error");
+      if (file.size > MAX_FILE_BYTES) {
+        toast("حجم الملف كبير. الحد الأقصى " + MAX_FILE_LABEL + ".", "error");
         return;
       }
 
       setBtnLoading(btn, true, "جاري الرفع والمشاركة...");
 
+      /* ---- الرفع إلى Cloudinary: نخزن الرابط فقط في jsonbin ---- */
+      if (USE_CLOUD) {
+        const form = new FormData();
+        form.append("file", file);
+        form.append("upload_preset", CLOUDINARY_UPLOAD_PRESET);
+        form.append("folder", "stem-vault");
+
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/auto/upload`);
+        xhr.upload.onprogress = ev => {
+          if (ev.lengthComputable) {
+            btn.innerHTML = '<span class="spinner"></span> ' + Math.round(ev.loaded / ev.total * 100) + "%";
+          }
+        };
+        xhr.onerror = () => {
+          toast("تعذر الرفع، تأكد من الاتصال وإعدادات Cloudinary.", "error");
+          setBtnLoading(btn, false);
+        };
+        xhr.onload = async () => {
+          let res = {};
+          try { res = JSON.parse(xhr.responseText); } catch (e) {}
+          if (xhr.status < 200 || xhr.status >= 300 || !res.secure_url) {
+            toast("فشل الرفع: " + ((res.error && res.error.message) || xhr.status), "error");
+            setBtnLoading(btn, false);
+            return;
+          }
+          const fileRecord = {
+            id: Date.now().toString(),
+            name: file.name,
+            type: file.type || "application/octet-stream",
+            size: file.size >= 1048576
+              ? (file.size / 1048576).toFixed(1) + " MB"
+              : (file.size / 1024).toFixed(1) + " KB",
+            subject: subject,
+            date: new Date().toLocaleDateString('ar-EG'),
+            uploader: currentUserEmail,
+            url: res.secure_url
+          };
+          await fetchServerData();
+          currentServerData.files = currentServerData.files || [];
+          currentServerData.files.unshift(fileRecord);
+          const ok = await updateServerData(currentServerData);
+          if (ok) toast("تم رفع ومشاركة الملف بنجاح!", "success");
+          else toast("تم الرفع لكن تعذر الحفظ على السيرفر، حاول مرة أخرى.", "error");
+          setBtnLoading(btn, false);
+          clearPicked();
+          syncWithServer();
+        };
+        xhr.send(form);
+        return;
+      }
+
+      /* ---- الطريقة القديمة (حتى 700KB داخل jsonbin) ---- */
       const reader = new FileReader();
       reader.onerror = function() {
         toast("تعذر قراءة الملف.", "error");
@@ -1382,6 +1445,23 @@
       const file = (window.cachedFiles || []).find(f => f.id == id);
       if (!file) return;
 
+      // ملفات Cloudinary: لها رابط مباشر
+      if (file.url) {
+        if (file.type.startsWith("image/") || file.type === "application/pdf") {
+          window.open(file.url, "_blank", "noopener");
+        } else {
+          const a = document.createElement("a");
+          a.href = file.url;
+          a.target = "_blank";
+          a.rel = "noopener";
+          a.download = file.name;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+        }
+        return;
+      }
+
       try {
         const url = URL.createObjectURL(dataUrlToBlob(file.dataUrl));
         if (file.type.startsWith("image/") || file.type === "application/pdf") {
@@ -1434,6 +1514,7 @@
       location.reload();
     }
 
+    document.getElementById("maxSizeNote").innerText = "الحد الأقصى للملف " + MAX_FILE_LABEL + ".";
     switchAuthTab("register");
   </script>
 </body>
